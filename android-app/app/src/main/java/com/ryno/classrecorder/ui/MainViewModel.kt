@@ -2,16 +2,20 @@ package com.ryno.classrecorder.ui
 
 import android.Manifest
 import android.app.Application
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryno.classrecorder.core.AppDefaults
+import com.ryno.classrecorder.core.AppUpdateInfo
+import com.ryno.classrecorder.core.AppUpdater
 import com.ryno.classrecorder.core.CourseSlot
 import com.ryno.classrecorder.core.CurrentClassMatch
 import com.ryno.classrecorder.core.ExportProgress
 import com.ryno.classrecorder.core.ExportResult
+import com.ryno.classrecorder.core.InstallLaunchResult
 import com.ryno.classrecorder.core.JsonModels
 import com.ryno.classrecorder.core.McpStatus
 import com.ryno.classrecorder.core.PromotionGrant
@@ -20,6 +24,7 @@ import com.ryno.classrecorder.core.RecordingExporter
 import com.ryno.classrecorder.core.RecordingRecord
 import com.ryno.classrecorder.core.RustCore
 import com.ryno.classrecorder.core.UnifiedSchedule
+import com.ryno.classrecorder.core.UpdateCheckResult
 import com.ryno.classrecorder.service.RecordingService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +50,15 @@ sealed interface ExportTarget {
     data class Selected(val ids: Set<String>) : ExportTarget
 }
 
+data class AppUpdateState(
+    val currentVersion: String = "0.0.0",
+    val isChecking: Boolean = false,
+    val availableUpdate: AppUpdateInfo? = null,
+    val downloadProgress: Int? = null,
+    val downloadedApkPath: String? = null,
+    val upToDateChecked: Boolean = false
+)
+
 data class MainUiState(
     val schedule: UnifiedSchedule? = null,
     val currentClass: CurrentClassMatch? = null,
@@ -59,6 +73,7 @@ data class MainUiState(
     val accentId: String = "mist",
     val isSyncing: Boolean = false,
     val exportProgress: ExportProgress? = null,
+    val updateState: AppUpdateState = AppUpdateState(),
     val statusMessage: String? = null
 )
 
@@ -67,7 +82,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     private val _ui = MutableStateFlow(
         run {
             val (savedMode, savedAccent) = AppearancePreferences.load(application)
-            MainUiState(themeMode = savedMode, accentId = savedAccent)
+            val currentVersion = AppUpdater.currentVersionName(application)
+            MainUiState(
+                themeMode = savedMode,
+                accentId = savedAccent,
+                updateState = AppUpdateState(currentVersion = currentVersion)
+            )
         }
     )
     val ui = _ui.asStateFlow()
@@ -100,6 +120,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
         runCatching { RustCore.startMcpServer(AppDefaults.MCP_PORT, "") }
         refreshAll()
+        checkForUpdates(manual = false)
     }
 
     fun refreshAll() {
@@ -413,6 +434,114 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         val valid = AppearancePreferences.parseAccentId(accentId)
         AppearancePreferences.saveAccentId(getApplication(), valid)
         _ui.update { it.copy(accentId = valid) }
+    }
+
+    fun checkForUpdates(manual: Boolean = true) {
+        if (_ui.value.updateState.isChecking || _ui.value.updateState.downloadProgress != null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentVersion = _ui.value.updateState.currentVersion
+            _ui.update { it.copy(updateState = it.updateState.copy(isChecking = true)) }
+            when (val res = AppUpdater.checkForUpdate(currentVersion)) {
+                is UpdateCheckResult.UpdateAvailable -> {
+                    _ui.update {
+                        it.copy(
+                            updateState = it.updateState.copy(
+                                isChecking = false,
+                                availableUpdate = res.update,
+                                upToDateChecked = false
+                            ),
+                            statusMessage = if (manual) "Update available: ${res.update.versionTag}" else it.statusMessage
+                        )
+                    }
+                }
+                is UpdateCheckResult.UpToDate -> {
+                    _ui.update {
+                        it.copy(
+                            updateState = it.updateState.copy(
+                                isChecking = false,
+                                availableUpdate = null,
+                                downloadedApkPath = null,
+                                upToDateChecked = true
+                            ),
+                            statusMessage = if (manual) "You're on the latest version (v${currentVersion.removePrefix("v")})" else it.statusMessage
+                        )
+                    }
+                }
+                is UpdateCheckResult.Error -> {
+                    _ui.update {
+                        it.copy(
+                            updateState = it.updateState.copy(isChecking = false),
+                            statusMessage = if (manual) "Update check failed: ${res.message}" else it.statusMessage
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun downloadAndInstallUpdate(onNeedInstallPermission: (Intent) -> Unit) {
+        val state = _ui.value.updateState
+        if (state.downloadProgress != null) return
+        val update = state.availableUpdate ?: return
+        val ctx = getApplication<Application>()
+
+        val cachedPath = state.downloadedApkPath
+        if (!cachedPath.isNullOrBlank()) {
+            val cachedFile = File(cachedPath)
+            if (cachedFile.exists() && cachedFile.length() > 0L) {
+                launchApkInstaller(ctx, cachedFile, onNeedInstallPermission)
+                return
+            }
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            _ui.update { it.copy(updateState = it.updateState.copy(downloadProgress = 0)) }
+            val result = AppUpdater.downloadApk(
+                context = ctx,
+                update = update,
+                onProgress = { pct ->
+                    _ui.update { it.copy(updateState = it.updateState.copy(downloadProgress = pct)) }
+                }
+            )
+            result.fold(
+                onSuccess = { apkFile ->
+                    _ui.update {
+                        it.copy(
+                            updateState = it.updateState.copy(
+                                downloadProgress = null,
+                                downloadedApkPath = apkFile.absolutePath
+                            )
+                        )
+                    }
+                    withContext(Dispatchers.Main.immediate) {
+                        launchApkInstaller(ctx, apkFile, onNeedInstallPermission)
+                    }
+                },
+                onFailure = { err ->
+                    _ui.update {
+                        it.copy(
+                            updateState = it.updateState.copy(downloadProgress = null),
+                            statusMessage = "Download failed: ${err.message ?: "network error"}"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    private fun launchApkInstaller(
+        ctx: Application,
+        apkFile: File,
+        onNeedInstallPermission: (Intent) -> Unit
+    ) {
+        when (val res = AppUpdater.installApk(ctx, apkFile)) {
+            InstallLaunchResult.Launched -> Unit
+            is InstallLaunchResult.NeedsInstallPermission -> {
+                showMessage("Allow installing updates from LectureShelf, then return")
+                onNeedInstallPermission(res.settingsIntent)
+            }
+            is InstallLaunchResult.Error -> showMessage(res.message)
+        }
     }
 
     fun showMessage(msg: String) {

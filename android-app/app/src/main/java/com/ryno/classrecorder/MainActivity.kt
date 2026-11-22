@@ -322,7 +322,11 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                                 showSettings = true
                             },
                             tier = GlassTier.Chrome,
-                            badgeTone = if (ui.mcpStatus.running) StatusTone.Ok else null
+                            badgeTone = when {
+                                ui.updateState.availableUpdate != null -> StatusTone.Busy
+                                ui.mcpStatus.running -> StatusTone.Ok
+                                else -> null
+                            }
                         )
                     }
                 }
@@ -357,6 +361,8 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                     onSaveFilenameTemplate = vm::saveFilenameTemplate,
                     onSyncSchedule = vm::syncSchedule,
                     onToggleMcp = vm::toggleMcpServer,
+                    onCheckUpdates = { vm.checkForUpdates(manual = true) },
+                    onInstallUpdate = vm::downloadAndInstallUpdate,
                     onShowMessage = vm::showMessage
                 )
             }

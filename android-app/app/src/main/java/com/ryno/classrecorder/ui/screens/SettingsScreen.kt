@@ -1,5 +1,6 @@
 package com.ryno.classrecorder.ui.screens
 
+import android.content.Intent
 import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -31,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -132,6 +134,8 @@ fun SettingsScreen(
     onSaveFilenameTemplate: (String, String) -> Unit,
     onSyncSchedule: (String) -> Unit,
     onToggleMcp: () -> Unit,
+    onCheckUpdates: () -> Unit = {},
+    onInstallUpdate: ((Intent) -> Unit) -> Unit = {},
     onShowMessage: (String) -> Unit
 ) {
     val context = LocalContext.current
@@ -175,6 +179,14 @@ fun SettingsScreen(
             AppearancePreferences.saveBackgroundPath(context, saved)
             CustomBackgroundRevision.bump()
             customBackgroundPath = saved
+        }
+    }
+
+    val installPermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (context.packageManager.canRequestPackageInstalls()) {
+            onInstallUpdate { }
         }
     }
 
@@ -465,6 +477,98 @@ fun SettingsScreen(
                                     )
                                 },
                                 modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // 5. App updates
+                val upd = ui.updateState
+                val available = upd.availableUpdate
+                val dlProgress = upd.downloadProgress
+                val updateSubtitle = when {
+                    dlProgress != null -> "Downloading ${available?.versionTag.orEmpty()}… $dlProgress%"
+                    available != null -> buildString {
+                        append("Update ${available.versionTag} available")
+                        if (available.apkSizeBytes > 0L) {
+                            append(" · ")
+                            append(UiFormatters.formatFileSize(available.apkSizeBytes))
+                        }
+                    }
+                    upd.isChecking -> "Checking GitHub Releases…"
+                    upd.upToDateChecked -> "Up to date"
+                    else -> "Check GitHub Releases for newer builds"
+                }
+
+                ListPageCard(
+                    title = "App updates",
+                    footer = "Downloads official signed APKs directly from GitHub Releases."
+                ) {
+                    ListPageRow(
+                        title = "LectureShelf v${upd.currentVersion.removePrefix("v")}",
+                        subtitle = updateSubtitle,
+                        leading = {
+                            SettingsIcon(
+                                icon = if (available != null) DshIcons.AutoAwesome else DshIcons.Refresh,
+                                tintSlot = if (available != null) 0 else 2
+                            )
+                        }
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, top = 4.dp, end = 16.dp, bottom = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (available != null && available.releaseNotes.isNotBlank()) {
+                            Text(
+                                text = available.releaseNotes
+                                    .lineSequence()
+                                    .map { it.trim().removePrefix("#").removePrefix("##").removePrefix("###").trim() }
+                                    .filter { it.isNotBlank() }
+                                    .take(4)
+                                    .joinToString("\n"),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = ClassRecorderTheme.dshColors.textTertiary,
+                                maxLines = 4,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (dlProgress != null) {
+                            LinearProgressIndicator(
+                                progress = { (dlProgress / 100f).coerceIn(0f, 1f) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(4.dp)
+                                    .clip(CircleShape),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                            )
+                        }
+                        if (available != null) {
+                            val readyToInstall = !upd.downloadedApkPath.isNullOrBlank()
+                            DshPrimaryButton(
+                                label = when {
+                                    dlProgress != null -> "Downloading $dlProgress%…"
+                                    readyToInstall -> "Install ${available.versionTag}"
+                                    else -> "Download & install ${available.versionTag}"
+                                },
+                                icon = DshIcons.Save,
+                                enabled = dlProgress == null,
+                                onClick = {
+                                    onInstallUpdate { permIntent ->
+                                        runCatching { installPermLauncher.launch(permIntent) }
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        } else {
+                            DshSecondaryButton(
+                                label = if (upd.isChecking) "Checking…" else "Check for updates",
+                                icon = DshIcons.Refresh,
+                                enabled = !upd.isChecking,
+                                onClick = onCheckUpdates,
+                                modifier = Modifier.fillMaxWidth()
                             )
                         }
                     }
