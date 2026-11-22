@@ -17,6 +17,7 @@ object RustCore {
     external fun initCore(filesDir: String, recordingsDir: String, bridge: RecordingBridge): String
     external fun getDataVersion(): Long
     external fun syncSchedule(sourceUrl: String): String
+    external fun importScheduleJson(raw: String, sourceUrl: String): String
     external fun getScheduleJson(): String
     external fun getCurrentClassJson(): String
     external fun prepareRecording(courseOverrideJson: String): String

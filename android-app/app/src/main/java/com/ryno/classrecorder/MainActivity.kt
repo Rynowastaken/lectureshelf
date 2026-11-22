@@ -1,6 +1,8 @@
 package com.ryno.classrecorder
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -59,6 +61,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ryno.classrecorder.core.PortalScheduleEndpoint
 import com.ryno.classrecorder.core.RecordingRecord
 import com.ryno.classrecorder.ui.MainViewModel
 import com.ryno.classrecorder.ui.components.BackdropVeil
@@ -167,6 +170,30 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
     ) { grants ->
         hasMicPermission = grants[Manifest.permission.RECORD_AUDIO] == true
     }
+    val timetablePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(vm::importSchedule)
+    }
+    val portalSync = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val source = result.data?.getStringExtra(PortalScheduleSyncActivity.SOURCE_URL)
+            val json = result.data?.getStringExtra(PortalScheduleSyncActivity.SCHEDULE_JSON)
+            if (source != null && json != null) vm.syncSignedInPortal(source, json)
+        }
+    }
+
+    fun openPortalSync(sourceUrl: String) {
+        portalSync.launch(Intent(context, PortalScheduleSyncActivity::class.java)
+            .putExtra(PortalScheduleSyncActivity.SOURCE_URL, sourceUrl))
+    }
+
+    fun syncSchedule(sourceUrl: String) {
+        val endpoint = PortalScheduleEndpoint.parse(sourceUrl)
+        if (endpoint != null && vm.usesPortalSignIn(endpoint.url)) {
+            openPortalSync(endpoint.url)
+        } else {
+            vm.syncSchedule(if (endpoint != null && "://" !in sourceUrl) endpoint.url else sourceUrl)
+        }
+    }
 
     fun requestPermissions() {
         val perms = mutableListOf(Manifest.permission.RECORD_AUDIO)
@@ -241,7 +268,11 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                         )
                         1 -> ScheduleScreen(
                             ui = ui,
-                            onSyncSchedule = vm::syncSchedule,
+                            onSyncSchedule = ::syncSchedule,
+                            onSignInSchedule = ::openPortalSync,
+                            onImportSchedule = {
+                                timetablePicker.launch(arrayOf("application/json", "application/octet-stream", "text/plain"))
+                            },
                             onRecordCourse = { course, slot ->
                                 if (hasMicPermission) {
                                     vm.startRecordingForCourse(course, slot)
@@ -359,7 +390,7 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                     onSelectThemeMode = vm::setThemeMode,
                     onSelectAccentId = vm::setAccentId,
                     onSaveFilenameTemplate = vm::saveFilenameTemplate,
-                    onSyncSchedule = vm::syncSchedule,
+                    onSyncSchedule = ::syncSchedule,
                     onToggleMcp = vm::toggleMcpServer,
                     onCheckUpdates = { vm.checkForUpdates(manual = true) },
                     onInstallUpdate = vm::downloadAndInstallUpdate,

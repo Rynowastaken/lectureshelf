@@ -6,7 +6,7 @@ import org.json.JSONObject
 object AppDefaults {
     const val FILENAME_TEMPLATE = "{date}_{time}_{class}_{room}"
     const val DATE_FORMAT = "yyyy-MM-dd"
-    const val SCHEDULE_URL = "https://uni-campus-app.pages.dev/s/qVaaFS5A"
+    const val SCHEDULE_URL = ""
     const val MCP_PORT = 8765
 }
 

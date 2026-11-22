@@ -2,6 +2,7 @@ package com.ryno.classrecorder.ui
 
 import android.Manifest
 import android.app.Application
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -35,6 +36,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.concurrent.atomic.AtomicLong
@@ -169,8 +171,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
                     lanIp = ip,
                     filenameTemplate = savedTmpl.ifBlank { AppDefaults.FILENAME_TEMPLATE },
                     dateFormat = savedFmt.ifBlank { AppDefaults.DATE_FORMAT },
-                    scheduleSourceInput = sched?.sourceUrl?.takeIf { it.isNotBlank() }
-                        ?: prev.scheduleSourceInput
+                    scheduleSourceInput = sched?.sourceUrl ?: prev.scheduleSourceInput
                 )
             }
         }
@@ -216,6 +217,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         _ui.update { prev ->
             val next = prev.copy(
                 schedule = sched,
+                scheduleSourceInput = if (sched != prev.schedule) {
+                    sched?.sourceUrl ?: prev.scheduleSourceInput
+                } else prev.scheduleSourceInput,
                 currentClass = cur,
                 mcpStatus = mcp,
                 recordings = recs
@@ -232,18 +236,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     }
 
     fun syncSchedule(sourceUrl: String) {
+        updateSchedule("Schedule synced", sourceUrl) { RustCore.syncSchedule(sourceUrl) }
+    }
+
+    private val schedulePreferences by lazy {
+        getApplication<Application>().getSharedPreferences("schedule_preferences", Context.MODE_PRIVATE)
+    }
+
+    fun usesPortalSignIn(sourceUrl: String): Boolean =
+        schedulePreferences.getString("signed_in_source", null) == sourceUrl
+
+    fun syncSignedInPortal(sourceUrl: String, json: String) {
+        updateSchedule("Schedule synced", sourceUrl, signedIn = true) {
+            RustCore.importScheduleJson(json, sourceUrl)
+        }
+    }
+
+    fun importSchedule(uri: Uri) {
+        updateSchedule("Schedule imported") {
+            val stream = getApplication<Application>().contentResolver.openInputStream(uri)
+                ?: throw IOException("Could not open the timetable file")
+            val json = stream.bufferedReader().use { reader ->
+                val content = StringBuilder()
+                val buffer = CharArray(8192)
+                while (true) {
+                    val count = reader.read(buffer)
+                    if (count == -1) break
+                    if (content.length + count > 1_048_576) {
+                        throw IOException("The timetable JSON is too large")
+                    }
+                    content.append(buffer, 0, count)
+                }
+                content.toString()
+            }
+            RustCore.importScheduleJson(json, "")
+        }
+    }
+
+    private fun updateSchedule(
+        successMessage: String,
+        sourceUrl: String? = null,
+        signedIn: Boolean = false,
+        update: () -> String
+    ) {
+        if (_ui.value.isSyncing) return
+        _ui.update {
+            it.copy(isSyncing = true, statusMessage = null, scheduleSourceInput = sourceUrl ?: it.scheduleSourceInput)
+        }
         viewModelScope.launch(Dispatchers.IO) {
-            _ui.update { it.copy(isSyncing = true, statusMessage = null, scheduleSourceInput = sourceUrl) }
-            val res = JSONObject(RustCore.syncSchedule(sourceUrl))
-            if (res.optBoolean("ok")) {
-                _ui.update { it.copy(isSyncing = false, statusMessage = "Schedule synced") }
+            val result = runCatching { JSONObject(update()) }
+            val response = result.getOrNull()
+            if (response?.optBoolean("ok") == true) {
+                if (signedIn) schedulePreferences.edit().putString("signed_in_source", sourceUrl).apply()
                 refreshAll()
+                _ui.update { it.copy(isSyncing = false, statusMessage = successMessage) }
             } else {
+                val message = response?.optString("error")?.takeIf { it.isNotBlank() }
+                    ?: result.exceptionOrNull()?.message ?: "Could not update the timetable"
                 _ui.update {
-                    it.copy(
-                        isSyncing = false,
-                        statusMessage = res.optString("error", "Sync failed")
-                    )
+                    it.copy(isSyncing = false, statusMessage = message)
                 }
             }
         }

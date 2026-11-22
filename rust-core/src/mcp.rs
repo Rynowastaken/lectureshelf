@@ -428,18 +428,23 @@ async fn dispatch_tool(state: &Arc<McpState>, name: &str, args: Value) -> Value 
             }
         }
         "sync_schedule" => {
-            let url = args
-                .get("source_url")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-                .or_else(|| state.storage.get_setting("schedule_source_url").ok().flatten())
-                .unwrap_or_else(|| "https://uni-campus-app.pages.dev/s/qVaaFS5A".to_string());
+            let url = match args.get("source_url").and_then(Value::as_str) {
+                Some(url) => url.to_string(),
+                None => match state.storage.load_schedule() {
+                    Ok(Some(schedule)) if schedule.source_url.is_empty() => {
+                        return tool_err("The current timetable was imported from a file. Provide a schedule URL to sync.");
+                    }
+                    Ok(Some(schedule)) => schedule.source_url,
+                    Ok(None) => state.storage.get_setting("schedule_source_url").ok().flatten()
+                        .unwrap_or_else(|| "https://uni-campus-app.pages.dev/s/qVaaFS5A".to_string()),
+                    Err(error) => return tool_err(error),
+                },
+            };
             match fetch_schedule(&url).await {
                 Ok(sched) => {
                     if let Err(e) = state.storage.save_schedule(&sched) {
                         return tool_err(e);
                     }
-                    let _ = state.storage.set_setting("schedule_source_url", &url);
                     tool_ok(json!({ "schedule": sched }))
                 }
                 Err(e) => tool_err(e),
@@ -514,7 +519,7 @@ fn tool_definitions() -> Value {
         },
         {
             "name": "sync_schedule",
-            "description": "Fetches and caches the schedule from a uni-campus-app share link/code or Personal-NUTC-Eportal JSON URL.",
+            "description": "Fetches and caches the schedule from a uni-campus-app share link/code or a Personal-NUTC-Eportal dashboard or timetable endpoint.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

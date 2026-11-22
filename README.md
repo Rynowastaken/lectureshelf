@@ -18,7 +18,11 @@ Records your lectures and files them by course — automatically. It reads your 
 
 **1. Install** — grab the APK from [**Releases**](https://github.com/Rynowastaken/lectureshelf/releases). Android 10+, 64-bit ARM. Allow Microphone + Notifications.
 
-**2. Sync timetable** — Schedule tab → **Sync** → paste your `uni-campus` share link.
+**2. Sync timetable** — Open the Schedule tab and choose **Sync schedule** or the schedule source icon. Paste your `uni-campus` share link or code, or the address of your [Personal-NUTC-Eportal](https://github.com/Rynowastaken/Personal-NUTC-Eportal) deployment (for example `https://portal.example.com` or `https://portal.example.com/api/class-schedule`). The portal server needs an active ePortal session.
+
+For a portal protected by Cloudflare Access, enter its HTTPS address and choose **Sign in and sync**. Complete sign-in with an email code. The `ep.rynowastaken.me` deployment also supports Discord and osu! sign-in. LectureShelf fetches the timetable directly and reuses the session when you refresh. If the portal server's NUTC session has expired, sign in on the portal dashboard first.
+
+You can also download a timetable from `/api/class-schedule?download=1` and open it with **Import timetable JSON** in the schedule source sheet.
 
 **3. Record** — hit the red button. The card up top shows your class: 🟢 **In class** · 🔵 **Up next** · ⚪ **Ready**.
 

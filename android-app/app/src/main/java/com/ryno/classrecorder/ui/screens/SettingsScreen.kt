@@ -350,7 +350,7 @@ fun SettingsScreen(
                     ListPageRow(
                         title = ui.schedule?.schoolName?.ifBlank { "No timetable synced" } ?: "No timetable synced",
                         subtitle = ui.schedule?.let { "${it.slots.size} periods configured" }
-                            ?: "Import uni-campus share link or NUTC timetable",
+                            ?: "Sync a uni-campus or NUTC Portal timetable",
                         leading = {
                             SettingsIcon(
                                 icon = DshIcons.CalendarMonth,
@@ -368,12 +368,12 @@ fun SettingsScreen(
                         DshTextField(
                             value = scheduleUrl,
                             onValueChange = { scheduleUrl = it },
-                            label = "Timetable URL or share link",
-                            placeholder = "https://uni-campus-app.pages.dev/s/...",
+                            label = "Portal address or share link",
+                            placeholder = "https://portal.example.com or share code",
                             mono = true,
                             imeAction = ImeAction.Go,
                             onImeAction = {
-                                if (scheduleUrl.isNotBlank()) onSyncSchedule(scheduleUrl.trim())
+                                if (scheduleUrl.isNotBlank() && !ui.isSyncing) onSyncSchedule(scheduleUrl.trim())
                             }
                         )
                         DshPrimaryButton(

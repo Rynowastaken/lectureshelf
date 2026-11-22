@@ -55,18 +55,21 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.ryno.classrecorder.core.CourseSlot
+import com.ryno.classrecorder.core.PortalScheduleEndpoint
 import com.ryno.classrecorder.ui.MainUiState
 import com.ryno.classrecorder.ui.components.AppSheet
 import com.ryno.classrecorder.ui.components.BackdropVeil
 import com.ryno.classrecorder.ui.components.BindScrollUnderVeil
 import com.ryno.classrecorder.ui.components.DshIcons
 import com.ryno.classrecorder.ui.components.DshPrimaryButton
+import com.ryno.classrecorder.ui.components.DshSecondaryButton
 import com.ryno.classrecorder.ui.components.DshTextField
 import com.ryno.classrecorder.ui.components.EmptyView
 import com.ryno.classrecorder.ui.components.GlassIconButton
 import com.ryno.classrecorder.ui.components.GlassSurface
 import com.ryno.classrecorder.ui.components.QuietTagPill
 import com.ryno.classrecorder.ui.components.StatusChip
+import com.ryno.classrecorder.ui.components.StatusDot
 import com.ryno.classrecorder.ui.components.rememberSafeSideInsets
 import com.ryno.classrecorder.ui.theme.AppShape
 import com.ryno.classrecorder.ui.theme.AppSpace
@@ -98,6 +101,8 @@ private data class ScheduledPeriod(
 fun ScheduleScreen(
     ui: MainUiState,
     onSyncSchedule: (String) -> Unit,
+    onSignInSchedule: (String) -> Unit,
+    onImportSchedule: () -> Unit,
     onRecordCourse: (CourseSlot, String) -> Unit,
     topContentInset: Dp = 0.dp,
     onScrolledUnderChange: (Float) -> Unit = {}
@@ -167,12 +172,12 @@ fun ScheduleScreen(
                     schoolName = schedule?.schoolName?.ifBlank { "Class schedule" } ?: "Class schedule",
                     subtitle = when {
                         ui.isSyncing -> "Syncing timetable…"
-                        schedule == null -> "Import your timetable share link"
+                        schedule == null -> "Import your timetable"
                         selectedDay == todayIndex -> if (todayCount == 1) "Today · 1 class" else "Today · $todayCount classes"
                         else -> "${FULL_DAYS[selectedDay]} · ${selectedPeriods.size} ${if (selectedPeriods.size == 1) "class" else "classes"}"
                     },
                     isSyncing = ui.isSyncing,
-                    showRefresh = schedule != null,
+                    showRefresh = !schedule?.sourceUrl.isNullOrBlank(),
                     onRefresh = {
                         val url = schedule?.sourceUrl?.takeIf { it.isNotBlank() } ?: ui.scheduleSourceInput
                         if (url.isNotBlank()) onSyncSchedule(url) else showSourceSheet = true
@@ -203,7 +208,7 @@ fun ScheduleScreen(
                         EmptyView(
                             icon = DshIcons.CalendarMonth,
                             title = "No schedule synced",
-                            message = "Import your uni-campus share link or NUTC timetable so recordings are tagged automatically.",
+                            message = "Sync a uni-campus or NUTC Portal timetable to tag your recordings automatically.",
                             actionLabel = "Sync schedule",
                             onAction = { showSourceSheet = true },
                             primaryAction = true
@@ -254,6 +259,14 @@ fun ScheduleScreen(
             onSync = { url ->
                 onSyncSchedule(url)
                 showSourceSheet = false
+            },
+            onSignIn = { url ->
+                showSourceSheet = false
+                onSignInSchedule(url)
+            },
+            onImport = {
+                showSourceSheet = false
+                onImportSchedule()
             },
             onDismiss = { showSourceSheet = false }
         )
@@ -581,9 +594,12 @@ private fun ScheduleSourceSheet(
     initialUrl: String,
     isSyncing: Boolean,
     onSync: (String) -> Unit,
+    onSignIn: (String) -> Unit,
+    onImport: () -> Unit,
     onDismiss: () -> Unit
 ) {
     var input by remember(initialUrl) { mutableStateOf(initialUrl) }
+    val portalEndpoint = remember(input) { PortalScheduleEndpoint.parse(input) }
     val dsh = ClassRecorderTheme.dshColors
 
     AppSheet(
@@ -594,10 +610,10 @@ private fun ScheduleSourceSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = AppSpace.sheetGutter),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Text(
-                text = "Paste your uni-campus share link or NUTC timetable URL to keep course names, rooms, and period times synced.",
+                text = "Paste your NUTC ePortal address or a uni-campus share link.",
                 style = MaterialTheme.typography.bodySmall,
                 color = dsh.textTertiary
             )
@@ -605,21 +621,84 @@ private fun ScheduleSourceSheet(
             DshTextField(
                 value = input,
                 onValueChange = { input = it },
-                label = "Share URL or code",
-                placeholder = "https://uni-campus-app.pages.dev/s/...",
+                label = "Portal address or share link",
+                placeholder = "https://portal.example.com or share code",
                 mono = true,
                 imeAction = ImeAction.Go,
                 onImeAction = {
-                    if (input.isNotBlank()) onSync(input.trim())
+                    if (input.isNotBlank() && !isSyncing) {
+                        if (portalEndpoint != null) onSignIn(portalEndpoint.url)
+                        else onSync(input.trim())
+                    }
                 }
             )
 
-            DshPrimaryButton(
-                label = if (isSyncing) "Syncing…" else "Sync schedule",
-                enabled = input.isNotBlank() && !isSyncing,
-                onClick = { onSync(input.trim()) },
-                modifier = Modifier.fillMaxWidth()
-            )
+            if (input.isNotBlank()) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    StatusDot(
+                        tone = if (portalEndpoint != null) StatusTone.Ok else StatusTone.Idle,
+                        size = 7.dp
+                    )
+                    Text(
+                        text = if (portalEndpoint != null) {
+                            "NUTC Portal · ${portalEndpoint.host} (signs in if needed)"
+                        } else {
+                            "uni-campus share link or code"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = dsh.textTertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(2.dp))
+
+            if (portalEndpoint != null) {
+                DshPrimaryButton(
+                    label = if (isSyncing) "Syncing…" else "Sign in & sync",
+                    enabled = !isSyncing,
+                    onClick = { onSignIn(portalEndpoint.url) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    DshSecondaryButton(
+                        label = "Direct sync",
+                        enabled = !isSyncing,
+                        onClick = { onSync(portalEndpoint.url) },
+                        modifier = Modifier.weight(1f)
+                    )
+                    DshSecondaryButton(
+                        label = "Import JSON",
+                        enabled = !isSyncing,
+                        onClick = onImport,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            } else {
+                DshPrimaryButton(
+                    label = if (isSyncing) "Syncing…" else "Sync schedule",
+                    enabled = input.isNotBlank() && !isSyncing,
+                    onClick = { onSync(input.trim()) },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                DshSecondaryButton(
+                    label = "Import timetable JSON",
+                    enabled = !isSyncing,
+                    onClick = onImport,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 }

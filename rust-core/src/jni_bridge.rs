@@ -8,7 +8,10 @@ use jni::{JNIEnv, JavaVM};
 use serde_json::{json, Value};
 
 use crate::mcp::{McpServerHandle, McpState, RecordingController};
-use crate::schedule::{fetch_schedule, match_current_class, CourseSlot, CurrentClassMatch, MatchKind};
+use crate::schedule::{
+    fetch_schedule, match_current_class, parse_schedule_json, CourseSlot, CurrentClassMatch,
+    MatchKind, UnifiedSchedule,
+};
 use crate::storage::{build_recording_path_with_options, RecordingRecord, Storage};
 
 struct CoreContext {
@@ -173,17 +176,32 @@ pub extern "system" fn Java_com_ryno_classrecorder_core_RustCore_syncSchedule(
 ) -> jstring {
     with_core(&mut env, |ctx, env| {
         let url = jstr(env, source_url);
-        match ctx.runtime.block_on(fetch_schedule(&url)) {
-            Ok(sched) => {
-                if let Err(e) = ctx.storage.save_schedule(&sched) {
-                    return err_json(e);
-                }
-                let _ = ctx.storage.set_setting("schedule_source_url", &url);
-                ok_json(serde_json::to_value(sched).unwrap_or(Value::Null))
-            }
-            Err(e) => err_json(e),
-        }
+        save_schedule_result(&ctx.storage, ctx.runtime.block_on(fetch_schedule(&url)))
     })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_ryno_classrecorder_core_RustCore_importScheduleJson(
+    mut env: JNIEnv,
+    _class: JClass,
+    raw: JString,
+    source_url: JString,
+) -> jstring {
+    with_core(&mut env, |ctx, env| {
+        let raw = jstr(env, raw);
+        let source_url = jstr(env, source_url);
+        save_schedule_result(&ctx.storage, parse_schedule_json(&raw, &source_url))
+    })
+}
+
+fn save_schedule_result(storage: &Storage, result: Result<UnifiedSchedule, String>) -> Value {
+    match result.and_then(|schedule| {
+        storage.save_schedule(&schedule)?;
+        Ok(schedule)
+    }) {
+        Ok(schedule) => ok_json(serde_json::to_value(schedule).unwrap_or(Value::Null)),
+        Err(error) => err_json(error),
+    }
 }
 
 #[no_mangle]

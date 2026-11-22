@@ -1,5 +1,9 @@
 use chrono::{Datelike, NaiveDateTime, NaiveTime, Weekday};
+use reqwest::{header::ACCEPT, StatusCode, Url};
 use serde::{Deserialize, Serialize};
+use std::{sync::OnceLock, time::Duration};
+
+const EPORTAL_SCHEDULE_PATH: &str = "/api/class-schedule";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +71,13 @@ struct EportalWrappedResponse {
     slots: Vec<RawSlotRow>,
     #[serde(default)]
     data: Vec<RawSlotRow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AisScheduleResponse {
+    periods: Vec<RawSlotRow>,
+    #[serde(default)]
+    stale: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,7 +190,28 @@ fn parse_raw_rows(rows: Vec<RawSlotRow>) -> Vec<TimeSlotRow> {
 
 /// Parses either kewutong/uni-campus-app JSON or Personal-NUTC-Eportal JSON into UnifiedSchedule.
 pub fn parse_schedule_json(raw: &str, source_url: &str) -> Result<UnifiedSchedule, String> {
+    let raw = raw.trim_start_matches('\u{feff}');
     let now = chrono::Utc::now().timestamp();
+
+    if let Ok(ais) = serde_json::from_str::<AisScheduleResponse>(raw) {
+        if ais.stale {
+            return Err("NUTC ePortal could only return a stale timetable. Refresh it in the portal and try again.".into());
+        }
+        if ais.periods.is_empty()
+            || ais
+                .periods
+                .iter()
+                .any(|row| row.days.len() != 7 || parse_time_range(&row.time).is_none())
+        {
+            return Err("NUTC ePortal returned invalid timetable periods".into());
+        }
+        return Ok(UnifiedSchedule {
+            school_name: "國立臺中科技大學".into(),
+            source_url: source_url.into(),
+            synced_at: now,
+            slots: parse_raw_rows(ais.periods),
+        });
+    }
 
     if let Ok(kw) = serde_json::from_str::<KewutongResponse>(raw) {
         if !kw.data.is_empty() || kw.status == "ok" {
@@ -231,8 +263,7 @@ pub fn parse_schedule_json(raw: &str, source_url: &str) -> Result<UnifiedSchedul
 }
 
 fn parse_time_range(range: &str) -> Option<(NaiveTime, NaiveTime)> {
-    let normalized = range
-        .replace(['～', '-', '–', '—'], "~");
+    let normalized = range.replace(['～', '-', '–', '—'], "~");
     let mut parts = normalized.split('~');
     let start_str = parts.next()?.trim();
     let end_str = parts.next()?.trim();
@@ -306,41 +337,143 @@ pub fn match_current_class(
 }
 
 pub async fn fetch_schedule(source_input: &str) -> Result<UnifiedSchedule, String> {
-    static HTTP_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     let resolved = resolve_schedule_source_url(source_input)?;
-    let client = HTTP_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .expect("reqwest TLS client init")
-    });
+    let url = Url::parse(&resolved).map_err(|_| "Invalid schedule source URL".to_string())?;
+    let client = HTTP_CLIENT.get_or_init(reqwest::Client::new);
+    let result = fetch_schedule_at(client, &url).await;
 
+    // A root URL may already serve schedule JSON. If it does not, try the Portal API.
+    if result.is_err() && url.path() == "/" {
+        let endpoint = url.join(EPORTAL_SCHEDULE_PATH).expect("valid portal path");
+        return fetch_schedule_at(client, &endpoint).await;
+    }
+    result
+}
+
+async fn fetch_schedule_at(client: &reqwest::Client, url: &Url) -> Result<UnifiedSchedule, String> {
+    let is_eportal = url.path() == EPORTAL_SCHEDULE_PATH;
     let resp = client
-        .get(&resolved)
+        .get(url.clone())
+        .header(ACCEPT, "application/json")
+        // A cold portal request may open a browser and sign in to AIS on the server.
+        .timeout(Duration::from_secs(if is_eportal { 120 } else { 15 }))
         .send()
         .await
-        .map_err(|e| format!("Failed to fetch schedule from {resolved}: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!(
-            "Schedule server returned HTTP {} for {}",
-            resp.status(),
-            resolved
-        ));
+        .map_err(|e| format!("Failed to fetch schedule: {}", e.without_url()))?;
+    let status = resp.status();
+    let requires_sign_in =
+        is_eportal && matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+    if !status.is_success() && !requires_sign_in {
+        return Err(format!("Schedule server returned HTTP {status}"));
     }
 
     let body = resp
         .text()
         .await
-        .map_err(|e| format!("Failed to read schedule response: {e}"))?;
+        .map_err(|e| format!("Failed to read schedule response: {}", e.without_url()))?;
 
-    parse_schedule_json(&body, &resolved)
+    if requires_sign_in {
+        if serde_json::from_str::<serde_json::Value>(&body).is_ok_and(|error| {
+            error.get("code").and_then(|code| code.as_str()) == Some("EPORTAL_LOGIN_REQUIRED")
+        }) {
+            return Err("Sign in to ePortal on the NUTC Portal dashboard, then sync again.".into());
+        }
+        return Err("This NUTC Portal requires browser access. Open it to sign in, then import its timetable JSON.".into());
+    }
+    if is_eportal && body.trim_start().starts_with('<') {
+        return Err("NUTC Portal returned a web page. If it requires browser access, sign in there and import its timetable JSON.".into());
+    }
+
+    parse_schedule_json(&body, url.as_str())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{http::StatusCode, routing::get, Router};
     use chrono::NaiveDate;
+
+    // Shaped like Personal-NUTC-Eportal's /api/class-schedule response.
+    const AIS_SCHEDULE: &str = r#"{
+        "source":"NUTC AIS", "sourceUrl":"https://ais.nutc.edu.tw/student/courses/my_week_time.aspx",
+        "timezone":"Asia/Taipei", "fetchedAt":"2026-11-17T12:00:00.000Z", "termLabel":"115年(上)",
+        "dayLabels":["週一","週二","週三","週四","週五","週六","週日"],
+        "periods":[{"slot":"11","time":"19:10~20:00","days":[{},{"name":"演算法","teacher":"王老師","room":"3402"},{},{},{},{},{"name":"體育","teacher":"李老師","room":"體育館"}]}],
+        "courses":[], "scheduledCells":2, "cached":false, "stale":false, "calendar":{"days":[]}
+    }"#;
+
+    #[tokio::test]
+    async fn fetches_the_ais_schedule_from_a_dashboard_url_and_keeps_its_endpoint() {
+        let app = Router::new()
+            .route("/", get(|| async { "<html>NUTC Portal</html>" }))
+            .route("/api/class-schedule", get(|| async { AIS_SCHEDULE }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let parsed = fetch_schedule(&origin).await.unwrap();
+        assert_eq!(parsed.source_url, format!("{origin}/api/class-schedule"));
+        assert_eq!(parsed.school_name, "國立臺中科技大學");
+        let row = &parsed.slots[0];
+        assert_eq!(row.slot, "11");
+        assert_eq!(row.time, "19:10~20:00");
+        assert!(row.days[0].is_none());
+        assert_eq!(row.days[6].as_ref().unwrap().name, "體育");
+
+        let tuesday = NaiveDate::from_ymd_opt(2026, 11, 17)
+            .unwrap()
+            .and_hms_opt(19, 30, 0)
+            .unwrap();
+        let matched = match_current_class(&parsed, tuesday, 15).unwrap();
+        assert_eq!(matched.kind, MatchKind::Active);
+        assert_eq!(matched.course.name, "演算法");
+        assert_eq!(matched.course.teacher, "王老師");
+        assert_eq!(matched.course.room, "3402");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_protected_portal_endpoint_explains_how_to_import() {
+        let app = Router::new().route(
+            "/api/class-schedule",
+            get(|| async { (StatusCode::FORBIDDEN, "Authentication required") }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!(
+            "http://{}/api/class-schedule",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let error = fetch_schedule(&endpoint).await.unwrap_err();
+        assert!(error.contains("sign in"), "{error}");
+        assert!(error.contains("JSON"), "{error}");
+        server.abort();
+    }
+
+    #[test]
+    fn imports_ais_json_without_using_the_private_ais_url_for_refresh() {
+        let parsed = parse_schedule_json(AIS_SCHEDULE, "").unwrap();
+        assert_eq!(parsed.source_url, "");
+        assert_eq!(parsed.slots[0].days[1].as_ref().unwrap().name, "演算法");
+    }
+
+    #[test]
+    fn rejects_an_incomplete_or_stale_ais_timetable() {
+        assert!(parse_schedule_json(r#"{"periods":[]}"#, "").is_err());
+        assert!(parse_schedule_json(
+            r#"{"periods":[{"slot":"1","time":"08:10~09:00","days":[{}]}]}"#,
+            ""
+        )
+        .is_err());
+        assert!(parse_schedule_json(
+            &AIS_SCHEDULE.replace("\"stale\":false", "\"stale\":true"),
+            ""
+        )
+        .unwrap_err()
+        .contains("stale"));
+    }
 
     #[test]
     fn test_resolve_uni_campus_share_url() {
@@ -370,7 +503,11 @@ mod tests {
                 {"slot":"1","time":"08:10~09:00","days":[{},{"name":"體育","teacher":"李俊杰","room":"0000","color":"#FFD600"},{"name":"大學之道","teacher":"何昕家","room":"3309","color":"#00DAC3"},{},{},{},{}]}
             ]
         }"##;
-        let parsed = parse_schedule_json(raw, "https://kewutong.cloud-service.win/api/v2/share/qVaaFS5A").unwrap();
+        let parsed = parse_schedule_json(
+            raw,
+            "https://kewutong.cloud-service.win/api/v2/share/qVaaFS5A",
+        )
+        .unwrap();
         assert_eq!(parsed.school_name, "國立臺中科技大學");
         assert_eq!(parsed.slots.len(), 1);
         assert!(parsed.slots[0].days[0].is_none());
