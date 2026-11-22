@@ -89,9 +89,14 @@ import com.ryno.classrecorder.ui.theme.ClassRecorderTheme
 import com.ryno.classrecorder.ui.theme.DshMotion
 import com.ryno.classrecorder.ui.theme.GlassTier
 import com.ryno.classrecorder.ui.theme.StatusTone
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import java.time.LocalDate
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 private data class CaptureSessionHeader(
     val isRecording: Boolean,
@@ -114,6 +119,7 @@ fun RecordScreen(
     onDiscardRecording: () -> Unit,
     onTogglePause: () -> Unit,
     onSelectCourseOverride: (CourseSlot?) -> Unit,
+    onOpenSchedule: () -> Unit = {},
     onToggleMcp: () -> Unit = {},
     onShowMessage: (String) -> Unit = {},
     topContentInset: Dp = 0.dp,
@@ -228,13 +234,27 @@ fun RecordScreen(
         else -> ""
     }
     val activeSlot = ui.currentClass?.slot.orEmpty()
+    var liveNowDate by remember { mutableStateOf(LocalDate.now()) }
+    var liveNowTime by remember {
+        mutableStateOf(LocalTime.now().format(DateTimeFormatter.ofPattern("HHmm", Locale.US)))
+    }
+    LaunchedEffect(Unit) {
+        val hhmmFmt = DateTimeFormatter.ofPattern("HHmm", Locale.US)
+        while (true) {
+            liveNowDate = LocalDate.now()
+            liveNowTime = LocalTime.now().format(hhmmFmt)
+            delay(30_000L)
+        }
+    }
     val targetPathPreview = remember(
         ui.filenameTemplate,
         ui.dateFormat,
         activeCourseName,
         activeRoom,
         activeTeacher,
-        activeSlot
+        activeSlot,
+        liveNowDate,
+        liveNowTime
     ) {
         val filePreview = UiFormatters.previewFilename(
             template = ui.filenameTemplate,
@@ -242,7 +262,9 @@ fun RecordScreen(
             courseName = activeCourseName,
             room = activeRoom.ifBlank { "Room" },
             teacher = activeTeacher.ifBlank { "Instructor" },
-            slot = activeSlot.ifBlank { "1" }
+            slot = activeSlot.ifBlank { "1" },
+            date = liveNowDate,
+            timeText = liveNowTime
         )
         val safeFolder = UiFormatters.sanitizePathSegment(activeCourseName)
         "$safeFolder/$filePreview"
@@ -339,7 +361,13 @@ fun RecordScreen(
                         }
                     },
                     onClick = if (!session.isRecording) {
-                        { showCoursePicker = true }
+                        {
+                            if (distinctCourses.isEmpty()) {
+                                onOpenSchedule()
+                            } else {
+                                showCoursePicker = true
+                            }
+                        }
                     } else null,
                     footer = {
                         OverviewFooterRow(
@@ -444,9 +472,9 @@ fun RecordScreen(
 
         BackdropVeil(
             fromTop = false,
-            solidHeight = navBottom + 76.dp,
-            feather = 18.dp,
-            alpha = bottomVeilAlpha,
+            solidHeight = navBottom + 20.dp,
+            feather = 36.dp,
+            alpha = bottomVeilAlpha * 0.90f,
             modifier = Modifier.align(Alignment.BottomCenter)
         )
 

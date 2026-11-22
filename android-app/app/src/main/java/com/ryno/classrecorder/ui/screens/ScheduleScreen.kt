@@ -172,6 +172,7 @@ fun ScheduleScreen(
                         else -> "${FULL_DAYS[selectedDay]} · ${selectedPeriods.size} ${if (selectedPeriods.size == 1) "class" else "classes"}"
                     },
                     isSyncing = ui.isSyncing,
+                    showRefresh = schedule != null,
                     onRefresh = {
                         val url = schedule?.sourceUrl?.takeIf { it.isNotBlank() } ?: ui.scheduleSourceInput
                         if (url.isNotBlank()) onSyncSchedule(url) else showSourceSheet = true
@@ -204,7 +205,8 @@ fun ScheduleScreen(
                             title = "No schedule synced",
                             message = "Import your uni-campus share link or NUTC timetable so recordings are tagged automatically.",
                             actionLabel = "Sync schedule",
-                            onAction = { showSourceSheet = true }
+                            onAction = { showSourceSheet = true },
+                            primaryAction = true
                         )
                     }
                 }
@@ -238,9 +240,9 @@ fun ScheduleScreen(
 
         BackdropVeil(
             fromTop = false,
-            solidHeight = navBottom + 10.dp,
-            feather = 20.dp,
-            alpha = bottomVeilAlpha,
+            solidHeight = 0.dp,
+            feather = navBottom + 4.dp,
+            alpha = bottomVeilAlpha * 0.65f,
             modifier = Modifier.align(Alignment.BottomCenter)
         )
     }
@@ -263,6 +265,7 @@ private fun ScheduleHeaderBar(
     schoolName: String,
     subtitle: String,
     isSyncing: Boolean,
+    showRefresh: Boolean,
     onRefresh: () -> Unit,
     onOpenSource: () -> Unit
 ) {
@@ -292,14 +295,16 @@ private fun ScheduleHeaderBar(
             )
         }
         Spacer(Modifier.width(8.dp))
-        GlassIconButton(
-            icon = DshIcons.Refresh,
-            contentDescription = "Refresh schedule",
-            onClick = onRefresh,
-            tier = GlassTier.Pill,
-            visualSize = 40.dp,
-            badgeTone = if (isSyncing) StatusTone.Busy else null
-        )
+        if (showRefresh) {
+            GlassIconButton(
+                icon = DshIcons.Refresh,
+                contentDescription = "Refresh schedule",
+                onClick = onRefresh,
+                tier = GlassTier.Pill,
+                visualSize = 40.dp,
+                badgeTone = if (isSyncing) StatusTone.Busy else null
+            )
+        }
         GlassIconButton(
             icon = DshIcons.Link,
             contentDescription = "Schedule source link",

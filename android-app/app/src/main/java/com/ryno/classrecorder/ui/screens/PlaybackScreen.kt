@@ -2,7 +2,10 @@ package com.ryno.classrecorder.ui.screens
 
 import android.media.MediaPlayer
 import android.media.PlaybackParams
+import android.net.Uri
 import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -82,6 +85,8 @@ fun PlaybackScreen(
     onDismiss: () -> Unit,
     onUpdateNotes: (String, String, List<String>) -> Unit,
     onDeleteRecording: (String) -> Unit,
+    onExportRecording: (RecordingRecord, Uri) -> Unit = { _, _ -> },
+    isExporting: Boolean = false,
     onShowMessage: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -101,6 +106,14 @@ fun PlaybackScreen(
     var lastScrubSeekUptimeMs by remember { mutableLongStateOf(0L) }
 
     val fileName = remember(recording.filePath) { File(recording.filePath).name }
+
+    val exportAudioLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("audio/mp4")
+    ) { uri: Uri? ->
+        if (uri != null) {
+            onExportRecording(recording, uri)
+        }
+    }
 
     LaunchedEffect(recording.id, recording.filePath) {
         val (exists, sizeStr) = withContext(Dispatchers.IO) {
@@ -361,11 +374,17 @@ fun PlaybackScreen(
                     }
                 }
 
-                // Playback speed
-                ListPageCard(
-                    title = "Playback speed",
-                    contentPadding = PaddingValues(12.dp)
+                // Playback speed (floats directly without a nested outer glass card)
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    Text(
+                        text = "Playback speed",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = dsh.textTertiary,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
                     SegmentedPill(
                         segments = SPEED_SEGMENTS,
                         selected = speed,
@@ -413,6 +432,22 @@ fun PlaybackScreen(
                             UiFormatters.copyToClipboard(context, "Filename", fileName)
                             onShowMessage("Copied filename")
                         }
+                    )
+
+                    DshSecondaryButton(
+                        label = if (isExporting) "Exporting…" else "Export audio (.m4a)",
+                        icon = DshIcons.Save,
+                        enabled = fileExists && !isExporting,
+                        onClick = {
+                            val safe = UiFormatters.sanitizePathSegment(fileName, "recording.m4a")
+                            val suggested = if (safe.endsWith(".m4a", ignoreCase = true)) safe else "$safe.m4a"
+                            runCatching {
+                                exportAudioLauncher.launch(suggested)
+                            }.onFailure {
+                                onShowMessage("No file picker available to save recording")
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
                     )
 
                     DshSecondaryButton(

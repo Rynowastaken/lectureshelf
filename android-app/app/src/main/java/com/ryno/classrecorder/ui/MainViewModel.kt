@@ -3,16 +3,20 @@ package com.ryno.classrecorder.ui
 import android.Manifest
 import android.app.Application
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryno.classrecorder.core.AppDefaults
 import com.ryno.classrecorder.core.CourseSlot
 import com.ryno.classrecorder.core.CurrentClassMatch
+import com.ryno.classrecorder.core.ExportProgress
+import com.ryno.classrecorder.core.ExportResult
 import com.ryno.classrecorder.core.JsonModels
 import com.ryno.classrecorder.core.McpStatus
 import com.ryno.classrecorder.core.PromotionGrant
 import com.ryno.classrecorder.core.RecordingBridge
+import com.ryno.classrecorder.core.RecordingExporter
 import com.ryno.classrecorder.core.RecordingRecord
 import com.ryno.classrecorder.core.RustCore
 import com.ryno.classrecorder.core.UnifiedSchedule
@@ -30,6 +34,17 @@ import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.concurrent.atomic.AtomicLong
 
+enum class ExportFormat {
+    ZIP,
+    SINGLE_AUDIO
+}
+
+sealed interface ExportTarget {
+    data object All : ExportTarget
+    data class Course(val courseName: String) : ExportTarget
+    data class Selected(val ids: Set<String>) : ExportTarget
+}
+
 data class MainUiState(
     val schedule: UnifiedSchedule? = null,
     val currentClass: CurrentClassMatch? = null,
@@ -43,6 +58,7 @@ data class MainUiState(
     val themeMode: DshThemeMode = DshThemeMode.SYSTEM,
     val accentId: String = "mist",
     val isSyncing: Boolean = false,
+    val exportProgress: ExportProgress? = null,
     val statusMessage: String? = null
 )
 
@@ -59,6 +75,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
     val recorderState = RecordingService.state
 
     private val lastSeenDataVersion = AtomicLong(-1L)
+    @Volatile
+    private var pendingExportTarget: ExportTarget = ExportTarget.All
+    @Volatile
+    private var pendingExportFormat: ExportFormat = ExportFormat.ZIP
 
     init {
         val ctx = getApplication<Application>()
@@ -253,6 +273,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
             RustCore.updateRecordingNotes(id, notes, JSONArray(tags).toString())
             refreshAll()
         }
+    }
+
+    fun prepareExport(target: ExportTarget, format: ExportFormat = ExportFormat.ZIP) {
+        pendingExportTarget = target
+        pendingExportFormat = format
+    }
+
+    fun exportSingleRecording(recording: RecordingRecord, destUri: Uri, onComplete: () -> Unit = {}) {
+        if (_ui.value.exportProgress != null) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _ui.update {
+                it.copy(
+                    exportProgress = ExportProgress(
+                        completedFiles = 0,
+                        totalFiles = 1,
+                        currentCourse = recording.courseName.ifBlank { "Uncategorized" }
+                    )
+                )
+            }
+            val result = RecordingExporter.exportSingleAudioToUri(
+                context = getApplication(),
+                destUri = destUri,
+                recording = recording,
+                onProgress = { progress ->
+                    _ui.update { it.copy(exportProgress = progress) }
+                }
+            )
+            val msg = formatExportResultMessage(result)
+            _ui.update { it.copy(exportProgress = null, statusMessage = msg) }
+            withContext(Dispatchers.Main.immediate) { onComplete() }
+        }
+    }
+
+    fun exportRecordings(destUri: Uri, onComplete: () -> Unit = {}) {
+        if (_ui.value.exportProgress != null) return
+        val target = pendingExportTarget
+        val format = pendingExportFormat
+        viewModelScope.launch(Dispatchers.IO) {
+            val allRecordings = _ui.value.recordings.ifEmpty {
+                val recObj = JSONObject(RustCore.listRecordings(""))
+                if (recObj.optBoolean("ok")) {
+                    JsonModels.parseRecordings(recObj.optJSONArray("data"))
+                } else emptyList()
+            }
+            val recordings = when (target) {
+                ExportTarget.All -> allRecordings
+                is ExportTarget.Course -> allRecordings.filter {
+                    it.courseName.ifBlank { "Uncategorized" } == target.courseName
+                }
+                is ExportTarget.Selected -> allRecordings.filter { target.ids.contains(it.id) }
+            }
+            _ui.update { it.copy(exportProgress = ExportProgress(0, recordings.size)) }
+            val result = if (format == ExportFormat.SINGLE_AUDIO && recordings.size == 1) {
+                RecordingExporter.exportSingleAudioToUri(
+                    context = getApplication(),
+                    destUri = destUri,
+                    recording = recordings.first(),
+                    onProgress = { progress ->
+                        _ui.update { it.copy(exportProgress = progress) }
+                    }
+                )
+            } else {
+                RecordingExporter.exportToUri(
+                    context = getApplication(),
+                    destUri = destUri,
+                    recordings = recordings,
+                    onProgress = { progress ->
+                        _ui.update { it.copy(exportProgress = progress) }
+                    }
+                )
+            }
+            val msg = formatExportResultMessage(result)
+            _ui.update { it.copy(exportProgress = null, statusMessage = msg) }
+            withContext(Dispatchers.Main.immediate) { onComplete() }
+        }
+    }
+
+    private fun formatExportResultMessage(result: ExportResult): String = when (result) {
+        is ExportResult.Success -> {
+            val singleName = result.exportedFileName
+            if (!singleName.isNullOrBlank()) {
+                "Exported $singleName"
+            } else {
+                val unit = if (result.exportedCount == 1) "recording" else "recordings"
+                if (result.missingCount > 0) {
+                    "Exported ${result.exportedCount} $unit to ZIP (${result.missingCount} missing on disk)"
+                } else {
+                    "Exported ${result.exportedCount} $unit to ZIP"
+                }
+            }
+        }
+        is ExportResult.Failure -> result.message
     }
 
     fun deleteRecording(id: String) {

@@ -125,25 +125,31 @@ fun GlassSurface(
         }
     }
 
-    // Claim a slot in the shared blur budget. Only the first N surfaces in a
-    // given frame get their own offscreen layer; the rest use the opaque fill.
-    val budget = LocalGlassBlurBudget.current
-    var claimed by remember { mutableStateOf(false) }
-    DisposableEffect(Unit) {
-        if (mutableBlurCount.value < budget) {
-            mutableBlurCount.value++
-            claimed = true
-        }
-        onDispose { if (claimed) mutableBlurCount.value-- }
-    }
-
-    val canSampleLayerBlur = s.blurs &&
+    // Claim a slot in the shared blur budget ONLY for surfaces that actually
+    // run an offscreen RenderEffect blur (GlassTier.Chrome). Card and Pill
+    // tiers have blurSigma == 0 and must not consume slots needed by Chrome bars.
+    val wantsLayerBlur = s.blurs &&
         surfaces.blurEnabled &&
         !reducedMotion &&
-        claimed &&
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
         backdropLayer != null &&
         tier != GlassTier.Sheet
+    val budget = LocalGlassBlurBudget.current
+    var claimed by remember { mutableStateOf(false) }
+    DisposableEffect(wantsLayerBlur) {
+        if (wantsLayerBlur && mutableBlurCount.value < budget) {
+            mutableBlurCount.value++
+            claimed = true
+        }
+        onDispose {
+            if (claimed) {
+                mutableBlurCount.value--
+                claimed = false
+            }
+        }
+    }
+
+    val canSampleLayerBlur = wantsLayerBlur && claimed
 
     val canUseWindowBlur = s.blurs &&
         surfaces.blurEnabled &&

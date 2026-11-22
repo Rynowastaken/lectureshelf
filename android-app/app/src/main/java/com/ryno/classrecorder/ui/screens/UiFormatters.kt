@@ -142,14 +142,16 @@ object UiFormatters {
         courseName: String = "大學之道",
         room: String = "3309",
         teacher: String = "何昕家",
-        slot: String = "3"
+        slot: String = "3",
+        date: LocalDate = SAMPLE_PREVIEW_DATE,
+        timeText: String = "1015"
     ): String {
         val safeCourse = sanitizePathSegment(courseName, "Uncategorized")
         val safeRoom = sanitizePathSegment(room, "Room")
         val safeTeacher = sanitizePathSegment(teacher, "Instructor")
         val effectiveTemplate = template.trim().ifEmpty { AppDefaults.FILENAME_TEMPLATE }
         val formattedDate = formatPreviewDate(
-            SAMPLE_PREVIEW_DATE,
+            date,
             dateFormat.trim().ifEmpty { AppDefaults.DATE_FORMAT }
         )
         val rawStem = effectiveTemplate
@@ -164,9 +166,9 @@ object UiFormatters {
             .replace("{lession}", "1")
             .replace("{room}", safeRoom)
             .replace("{teacher}", safeTeacher)
-            .replace("{time}", "1015")
+            .replace("{time}", timeText)
             .replace("{slot}", slot)
-        val stem = sanitizePathSegment(rawStem, "${formattedDate}_1015_$safeCourse")
+        val stem = sanitizePathSegment(rawStem, "${formattedDate}_${timeText}_$safeCourse")
         return if (stem.endsWith(".m4a", ignoreCase = true)) stem else "$stem.m4a"
     }
 

@@ -769,6 +769,7 @@ fun EmptyView(
     message: String? = null,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
+    primaryAction: Boolean = false,
     compact: Boolean = false
 ) {
     val dsh = ClassRecorderTheme.dshColors
@@ -818,10 +819,17 @@ fun EmptyView(
         }
         if (!actionLabel.isNullOrBlank() && onAction != null) {
             Spacer(Modifier.height(if (compact) 14.dp else 20.dp))
-            DshSecondaryButton(
-                label = actionLabel,
-                onClick = onAction
-            )
+            if (primaryAction) {
+                DshPrimaryButton(
+                    label = actionLabel,
+                    onClick = onAction
+                )
+            } else {
+                DshSecondaryButton(
+                    label = actionLabel,
+                    onClick = onAction
+                )
+            }
         }
     }
 }

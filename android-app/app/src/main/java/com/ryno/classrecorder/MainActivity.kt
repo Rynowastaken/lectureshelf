@@ -229,6 +229,11 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                             onDiscardRecording = vm::discardRecording,
                             onTogglePause = vm::togglePause,
                             onSelectCourseOverride = vm::selectCourseOverride,
+                            onOpenSchedule = {
+                                scope.launch {
+                                    pagerState.animateScrollToPage(1, animationSpec = DshMotion.standardTween(reduced))
+                                }
+                            },
                             onToggleMcp = vm::toggleMcpServer,
                             onShowMessage = vm::showMessage,
                             topContentInset = topReserved,
@@ -255,6 +260,8 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                             isActiveTab = pagerState.currentPage == 2 && !overlayOpen && !isRecording,
                             onToggleMcp = vm::toggleMcpServer,
                             onDeleteRecording = vm::deleteRecording,
+                            onPrepareExport = vm::prepareExport,
+                            onExportToUri = vm::exportRecordings,
                             onShowMessage = vm::showMessage,
                             onOpenPlayback = { rec ->
                                 lastPlaybackSnapshot = rec
@@ -268,8 +275,8 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
 
                 BackdropVeil(
                     fromTop = true,
-                    solidHeight = topReserved,
-                    feather = 14.dp,
+                    solidHeight = statusTop,
+                    feather = 28.dp,
                     alpha = currentVeilAlpha,
                     modifier = Modifier.align(Alignment.TopCenter)
                 )
@@ -332,6 +339,10 @@ fun ClassRecorderApp(vm: MainViewModel = viewModel()) {
                             activePlaybackId = null
                             vm.deleteRecording(id)
                         },
+                        onExportRecording = { record, uri ->
+                            vm.exportSingleRecording(record, uri)
+                        },
+                        isExporting = ui.exportProgress != null,
                         onShowMessage = vm::showMessage
                     )
                 }

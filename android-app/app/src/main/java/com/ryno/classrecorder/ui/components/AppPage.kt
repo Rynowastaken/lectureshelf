@@ -56,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import com.ryno.classrecorder.ui.theme.AppSpace
 import com.ryno.classrecorder.ui.theme.ClassRecorderTheme
 import com.ryno.classrecorder.ui.theme.DshMotion
+import com.ryno.classrecorder.ui.theme.GlassTier
 import com.ryno.classrecorder.ui.theme.tabular
 import kotlinx.coroutines.CancellationException
 
@@ -203,17 +204,17 @@ fun AppPage(
 
             BackdropVeil(
                 fromTop = true,
-                solidHeight = topReserved,
-                feather = 12.dp,
+                solidHeight = statusTop,
+                feather = 28.dp,
                 alpha = veilAlpha,
                 modifier = Modifier.align(Alignment.TopCenter)
             )
 
             BackdropVeil(
                 fromTop = false,
-                solidHeight = navBottom + 10.dp,
-                feather = 20.dp,
-                alpha = bottomVeilAlpha,
+                solidHeight = 0.dp,
+                feather = navBottom + 4.dp,
+                alpha = bottomVeilAlpha * 0.65f,
                 modifier = Modifier.align(Alignment.BottomCenter)
             )
 
@@ -236,21 +237,33 @@ fun AppPage(
                         onClick = onBack
                     )
 
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        textAlign = TextAlign.Center,
+                    Box(
                         modifier = Modifier
                             .weight(1f)
-                            .padding(horizontal = 8.dp)
-                            .graphicsLayer {
-                                alpha = barTitleProgress
-                                translationY = titleSlideOffsetPx
+                            .padding(horizontal = 8.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (barTitleProgress > 0.01f) {
+                            GlassSurface(
+                                tier = GlassTier.Chrome,
+                                stadium = true,
+                                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 9.dp),
+                                modifier = Modifier.graphicsLayer {
+                                    alpha = barTitleProgress
+                                    translationY = titleSlideOffsetPx
+                                }
+                            ) {
+                                Text(
+                                    text = title,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    textAlign = TextAlign.Center
+                                )
                             }
-                    )
+                        }
+                    }
 
                     Box(
                         modifier = Modifier.sizeIn(minWidth = 48.dp),

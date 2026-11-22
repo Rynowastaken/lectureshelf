@@ -32,10 +32,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
@@ -143,7 +148,6 @@ fun DshBackdrop(
     val backdropSampleLayer = rememberGraphicsLayer()
     val photo = customImage
 
-    CompositionLocalProvider(LocalBackdropLayer provides backdropSampleLayer) {
     // Scrim strength adapts to how BRIGHT the photo is, not its average: an
     // illustration can average 0.65 while its bright regions sit near 241/255,
     // and those are what swallow white text.
@@ -158,72 +162,65 @@ fun DshBackdrop(
         (0.22f + bright * 0.30f).coerceIn(0.22f, 0.55f)
     }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .drawWithContent {
-                // The ONE recorded layer: wallpaper + scrim + gradient + glows.
-                backdropSampleLayer.record { this@drawWithContent.drawContent() }
-                drawLayer(backdropSampleLayer)
-            }
-            .drawWithCache {
-                // With a photo present the gradient becomes a translucent TINT.
-                // Drawn opaque it simply painted over the wallpaper - which is
-                // why the image loaded, drew, and was never visible.
-                val hasPhoto = photo != null
-                val tintAlpha = if (hasPhoto) 0.42f else 1f
-                val bgBrush = Brush.verticalGradient(
-                    colors = listOf(
-                        s.backdropTop.copy(alpha = tintAlpha),
-                        s.backdropBottom.copy(alpha = tintAlpha)
-                    ),
-                    startY = 0f,
-                    endY = size.height
-                )
-                val longest = max(size.width, size.height)
-                val center1 = Offset(size.width * 0.92f, 0f)
-                val radius1 = (longest * 0.62f).coerceAtLeast(1f)
-                val glow1 = Brush.radialGradient(
-                    colors = listOf(s.glowPrimary, s.glowPrimary.copy(alpha = 0f)),
-                    center = center1,
-                    radius = radius1
-                )
-                val center2 = Offset(0f, size.height)
-                val radius2 = (longest * 0.55f).coerceAtLeast(1f)
-                val glow2 = Brush.radialGradient(
-                    colors = listOf(s.glowSecondary, s.glowSecondary.copy(alpha = 0f)),
-                    center = center2,
-                    radius = radius2
-                )
-                onDrawBehind {
-                    // 1. Wallpaper, cover-fitted.
-                    // 2. Scrim, so text and glass keep their contrast.
-                    // 3. Gradient, as the theme's tint over the image.
-                    // 4. Glows, the two accent pools the glass refracts.
-                    val image = photo
-                    if (image != null) {
-                        // Blur the wallpaper itself. A blur does not survive
-                        // being scaled here, so the image is painted into an
-                        // intermediate layer, that layer is blurred by drawing
-                        // it back with a RenderEffect-backed filter, and only
-                        // then is it composited into the backdrop.
-                        //
-                        // DrawScope has no direct "blur this layer" call, so the
-                        // blur is applied to the ImageBitmap once at load time
-                        // (see CustomBackground.load) and the result is drawn
-                        // here. That keeps the per-frame cost at zero.
-                        drawImageCover(image)
-                        drawRect(Color.Black.copy(alpha = scrim))
-                    }
-                    drawRect(brush = bgBrush)
-                    if (longest > 0f) {
-                        drawCircle(brush = glow1, radius = radius1, center = center1)
-                        drawCircle(brush = glow2, radius = radius2, center = center2)
+    Box(modifier = modifier.fillMaxSize()) {
+        // Record ONLY the backdrop (wallpaper + scrim + gradient + glows) in a
+        // dedicated sibling Box so foreground GlassSurfaces sampling
+        // LocalBackdropLayer can never create a self-referential RenderNode cycle
+        // (which otherwise overflows RenderThread's stack in prepareTreeImpl).
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .drawWithContent {
+                    backdropSampleLayer.record { this@drawWithContent.drawContent() }
+                    drawLayer(backdropSampleLayer)
+                }
+                .drawWithCache {
+                    val hasPhoto = photo != null
+                    val tintAlpha = if (hasPhoto) 0.42f else 1f
+                    val bgBrush = Brush.verticalGradient(
+                        colors = listOf(
+                            s.backdropTop.copy(alpha = tintAlpha),
+                            s.backdropBottom.copy(alpha = tintAlpha)
+                        ),
+                        startY = 0f,
+                        endY = size.height
+                    )
+                    val longest = max(size.width, size.height)
+                    val center1 = Offset(size.width * 0.92f, 0f)
+                    val radius1 = (longest * 0.62f).coerceAtLeast(1f)
+                    val glow1 = Brush.radialGradient(
+                        colors = listOf(s.glowPrimary, s.glowPrimary.copy(alpha = 0f)),
+                        center = center1,
+                        radius = radius1
+                    )
+                    val center2 = Offset(0f, size.height)
+                    val radius2 = (longest * 0.55f).coerceAtLeast(1f)
+                    val glow2 = Brush.radialGradient(
+                        colors = listOf(s.glowSecondary, s.glowSecondary.copy(alpha = 0f)),
+                        center = center2,
+                        radius = radius2
+                    )
+                    onDrawBehind {
+                        val image = photo
+                        if (image != null) {
+                            drawImageCover(image)
+                            drawRect(Color.Black.copy(alpha = scrim))
+                        }
+                        drawRect(brush = bgBrush)
+                        if (longest > 0f) {
+                            drawCircle(brush = glow1, radius = radius1, center = center1)
+                            drawCircle(brush = glow2, radius = radius2, center = center2)
+                        }
                     }
                 }
-            },
-        content = content
-    )
+        )
+
+        CompositionLocalProvider(LocalBackdropLayer provides backdropSampleLayer) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                content = content
+            )
+        }
     }
 }
 
@@ -287,46 +284,93 @@ private fun DrawScope.drawImageCover(image: ImageBitmap) {
 
 /**
  * Feathered backdrop band placed behind floating top/bottom chrome once content
- * scrolls underneath. Uses a single cached 3-stop gradient with zero Offscreen layer passes.
+ * scrolls underneath. Samples the live [LocalBackdropLayer] (wallpaper + scrim +
+ * gradient + glows) masked with an 8-stop `easeInOutCubic` alpha ramp so there is
+ * never a flat-color mismatch or hard linear crease cutting across scrolled controls.
  */
 @Composable
 fun BackdropVeil(
     fromTop: Boolean,
     solidHeight: Dp,
-    feather: Dp = 14.dp,
+    feather: Dp = 28.dp,
     alpha: Float = 1f,
     modifier: Modifier = Modifier
 ) {
-    if (alpha <= 0.001f) return
+    val clampedAlpha = alpha.coerceIn(0f, 1f)
+    if (clampedAlpha <= 0.001f) return
     val s = ClassRecorderTheme.surfaces
+    val backdropLayer = LocalBackdropLayer.current
     val totalHeight = solidHeight + feather
+    if (totalHeight <= 0.dp) return
+
+    var rootOffset by remember { mutableStateOf(Offset.Zero) }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(totalHeight)
+            .then(
+                if (!fromTop && backdropLayer != null) {
+                    Modifier.onGloballyPositioned { coords ->
+                        val next = coords.positionInRoot()
+                        if (kotlin.math.abs(next.x - rootOffset.x) > 0.5f ||
+                            kotlin.math.abs(next.y - rootOffset.y) > 0.5f
+                        ) {
+                            rootOffset = next
+                        }
+                    }
+                } else Modifier
+            )
             .graphicsLayer {
-                this.alpha = alpha.coerceIn(0f, 1f)
+                this.alpha = clampedAlpha
+                if (backdropLayer != null) {
+                    compositingStrategy = CompositingStrategy.Offscreen
+                }
             }
             .drawWithCache {
                 val bandH = size.height
                 val featherFrac = if (bandH > 0f) (feather.toPx() / bandH).coerceIn(0f, 1f) else 0f
-                val stops = if (fromTop) {
-                    arrayOf(
-                        0f to s.backdropTop,
-                        (1f - featherFrac).coerceAtLeast(0f) to s.backdropTop.copy(alpha = 0.96f),
-                        1f to Color.Transparent
-                    )
-                } else {
-                    arrayOf(
-                        0f to Color.Transparent,
-                        featherFrac to s.backdropBottom.copy(alpha = 0.96f),
-                        1f to s.backdropBottom
-                    )
+                val samples = 8
+                val stopList = ArrayList<Pair<Float, Color>>(samples + 3)
+
+                fun easeInOutCubic(t: Float): Float =
+                    if (t < 0.5f) 4f * t * t * t
+                    else 1f - ((-2f * t + 2f) * (-2f * t + 2f) * (-2f * t + 2f)) / 2f
+
+                val fallbackColor = if (fromTop) s.backdropTop else s.backdropBottom
+                val maskBase = if (backdropLayer != null) Color.Black else fallbackColor
+
+                if (fromTop && featherFrac < 1f) {
+                    stopList.add(0f to maskBase)
                 }
-                val brush = Brush.verticalGradient(*stops)
+                for (i in 0..samples) {
+                    val t = i.toFloat() / samples.toFloat()
+                    val pos = if (fromTop) {
+                        (1f - featherFrac) + featherFrac * t
+                    } else {
+                        featherFrac * t
+                    }.coerceIn(0f, 1f)
+                    val eased = easeInOutCubic(t)
+                    val stopAlpha = if (fromTop) 1f - eased else eased
+                    stopList.add(pos to maskBase.copy(alpha = stopAlpha))
+                }
+                if (!fromTop && featherFrac < 1f) {
+                    stopList.add(1f to maskBase)
+                }
+
+                val maskBrush = Brush.verticalGradient(*stopList.toTypedArray())
+
                 onDrawBehind {
-                    if (bandH > 0f) {
-                        drawRect(brush = brush)
+                    if (bandH <= 0f) return@onDrawBehind
+                    if (backdropLayer != null) {
+                        val ox = if (fromTop) 0f else rootOffset.x
+                        val oy = if (fromTop) 0f else rootOffset.y
+                        translate(left = -ox, top = -oy) {
+                            drawLayer(backdropLayer)
+                        }
+                        drawRect(brush = maskBrush, blendMode = BlendMode.DstIn)
+                    } else {
+                        drawRect(brush = maskBrush)
                     }
                 }
             }

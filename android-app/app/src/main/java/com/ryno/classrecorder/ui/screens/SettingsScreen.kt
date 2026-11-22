@@ -456,7 +456,7 @@ fun SettingsScreen(
                                 modifier = Modifier.weight(1f)
                             )
                             DshPrimaryButton(
-                                label = "Save format",
+                                label = "Save",
                                 icon = DshIcons.Save,
                                 onClick = {
                                     onSaveFilenameTemplate(
