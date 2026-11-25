@@ -16,11 +16,14 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.SystemClock
+import android.util.Log
 import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import com.ryno.classrecorder.MainActivity
 import com.ryno.classrecorder.R
+import com.ryno.classrecorder.core.AppRecordingBridge
 import com.ryno.classrecorder.core.JsonModels
+import com.ryno.classrecorder.core.RecordingFailsafe
 import com.ryno.classrecorder.core.RecordingRecord
 import com.ryno.classrecorder.core.RustCore
 import com.ryno.classrecorder.ui.screens.UiFormatters
@@ -38,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 
 data class RecorderState(
     val isRecording: Boolean = false,
@@ -50,10 +54,18 @@ data class RecorderState(
 class RecordingService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val lifecycleLock = Any()
     private var recorder: MediaRecorder? = null
+    private var activeOutputPath: String? = null
     private var tickerJob: Job? = null
+    private var checkpointJob: Job? = null
     private var startEpochMs: Long = 0L
     private var accumulatedMs: Long = 0L
+
+    override fun onCreate() {
+        super.onCreate()
+        installCrashFailsafe()
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -70,13 +82,41 @@ class RecordingService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun startInternal(courseJson: String) {
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (_state.value.isRecording) {
+            stopInternal()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun installCrashFailsafe() {
+        if (crashHandlerInstalled) return
+        crashHandlerInstalled = true
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                activeInstance?.let { service ->
+                    if (_state.value.isRecording) {
+                        service.stopInternal()
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "Crash failsafe failed while saving recording", t)
+            } finally {
+                previous?.uncaughtException(thread, throwable)
+            }
+        }
+    }
+
+    private fun startInternal(courseJson: String) = synchronized(lifecycleLock) {
         if (_state.value.isRecording) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED
         ) {
             return
         }
+
+        AppRecordingBridge.ensureCoreInitialized(this)
 
         val prepRaw = RustCore.prepareRecording(courseJson)
         val prepObj = JSONObject(prepRaw)
@@ -95,43 +135,88 @@ class RecordingService : Service() {
             startForeground(notificationIdFor(this), notification)
         }
 
-        try {
-            val mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                MediaRecorder(this)
-            } else {
-                @Suppress("DEPRECATION")
-                MediaRecorder()
-            }
-            mr.setAudioSource(MediaRecorder.AudioSource.MIC)
-            mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-            mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-            mr.setAudioEncodingBitRate(128_000)
-            mr.setAudioSamplingRate(44_100)
-            mr.setOutputFile(rec.filePath)
-            mr.prepare()
-            mr.start()
+        val fallbackPath = File(filesDir, "Recordings/Fallback/${File(rec.filePath).name}").absolutePath
+        val started = startRecorderWithFallback(rec.filePath)
+            ?: startRecorderWithFallback(fallbackPath)
 
-            recorder = mr
-            accumulatedMs = 0L
-            startEpochMs = System.currentTimeMillis()
-            _state.value = RecorderState(
-                isRecording = true,
-                isPaused = false,
-                elapsedMs = 0L,
-                amplitude = 0f,
-                activeRecording = rec
-            )
-            startTicker()
-        } catch (_: Exception) {
+        if (started == null) {
             recorder?.release()
             recorder = null
+            activeOutputPath = null
             RustCore.deleteRecording(rec.id)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
+            return
         }
+
+        recorder = started.first
+        activeOutputPath = started.second
+        activeInstance = this
+        accumulatedMs = 0L
+        startEpochMs = System.currentTimeMillis()
+        RecordingFailsafe.saveCheckpoint(filesDir, rec.id, rec.filePath, 0L)
+        _state.value = RecorderState(
+            isRecording = true,
+            isPaused = false,
+            elapsedMs = 0L,
+            amplitude = 0f,
+            activeRecording = rec
+        )
+        startTicker()
+        startCheckpointLoop()
     }
 
-    private fun togglePauseInternal() {
+    private fun startRecorderWithFallback(outputPath: String): Pair<MediaRecorder, String>? {
+        val configs = listOf(
+            RecorderConfig(MediaRecorder.AudioSource.MIC, 128_000, 44_100),
+            RecorderConfig(MediaRecorder.AudioSource.DEFAULT, 64_000, 16_000)
+        )
+        for (cfg in configs) {
+            var mr: MediaRecorder? = null
+            try {
+                File(outputPath).parentFile?.mkdirs()
+                mr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    MediaRecorder(this)
+                } else {
+                    @Suppress("DEPRECATION")
+                    MediaRecorder()
+                }
+                mr.setAudioSource(cfg.audioSource)
+                mr.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                mr.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                mr.setAudioEncodingBitRate(cfg.bitRate)
+                mr.setAudioSamplingRate(cfg.sampleRate)
+                mr.setOutputFile(outputPath)
+                mr.setOnErrorListener { _, what, extra ->
+                    Log.e(TAG, "MediaRecorder error what=$what extra=$extra; saving partial recording")
+                    stopInternal()
+                }
+                mr.setOnInfoListener { _, what, _ ->
+                    if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_FILESIZE_REACHED ||
+                        what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED
+                    ) {
+                        Log.w(TAG, "MediaRecorder limit reached ($what); finalizing recording")
+                        stopInternal()
+                    }
+                }
+                mr.prepare()
+                mr.start()
+                return mr to outputPath
+            } catch (e: Exception) {
+                Log.w(TAG, "MediaRecorder start failed for $outputPath ($cfg): ${e.message}")
+                runCatching { mr?.release() }
+            }
+        }
+        return null
+    }
+
+    private data class RecorderConfig(
+        val audioSource: Int,
+        val bitRate: Int,
+        val sampleRate: Int
+    )
+
+    private fun togglePauseInternal() = synchronized(lifecycleLock) {
         val current = _state.value
         if (!current.isRecording) return
         try {
@@ -148,6 +233,11 @@ class RecordingService : Service() {
                     amplitude = 0f
                 )
             }
+            current.activeRecording?.let { rec ->
+                val elapsed = if (_state.value.isPaused) accumulatedMs
+                else accumulatedMs + (System.currentTimeMillis() - startEpochMs)
+                RecordingFailsafe.saveCheckpoint(filesDir, rec.id, rec.filePath, elapsed)
+            }
             val courseName = current.activeRecording?.courseName ?: "Class Recording"
             val elapsed = if (_state.value.isPaused) accumulatedMs
             else accumulatedMs + (System.currentTimeMillis() - startEpochMs)
@@ -157,21 +247,43 @@ class RecordingService : Service() {
         }
     }
 
-    private fun stopInternal() {
+    private fun stopInternal() = synchronized(lifecycleLock) {
         val current = _state.value
         if (!current.isRecording) return
 
         tickerJob?.cancel()
+        checkpointJob?.cancel()
         val totalMs = if (current.isPaused) {
             accumulatedMs
         } else {
             accumulatedMs + (System.currentTimeMillis() - startEpochMs)
-        }
+        }.coerceAtLeast(0L)
 
         releaseRecorder()
+        val recordedPath = activeOutputPath
+        activeOutputPath = null
+        activeInstance = null
 
         current.activeRecording?.let { rec ->
-            RustCore.completeRecording(rec.id, totalMs)
+            if (recordedPath != null && recordedPath != rec.filePath) {
+                val src = File(recordedPath)
+                val dst = File(rec.filePath)
+                if (src.exists() && src.length() > 0L) {
+                    runCatching {
+                        dst.parentFile?.mkdirs()
+                        src.copyTo(dst, overwrite = true)
+                        src.delete()
+                    }
+                }
+            }
+            val finalPath = if (File(rec.filePath).let { it.exists() && it.length() > 0L }) {
+                rec.filePath
+            } else {
+                recordedPath ?: rec.filePath
+            }
+            val probedMs = RecordingFailsafe.probeAudioDurationMs(finalPath) ?: 0L
+            val finalDurationMs = maxOf(totalMs, probedMs)
+            RecordingFailsafe.completeWithRetry(this, rec.id, finalDurationMs)
         }
 
         _state.value = RecorderState()
@@ -180,14 +292,23 @@ class RecordingService : Service() {
         stopSelf()
     }
 
-    private fun discardInternal() {
+    private fun discardInternal() = synchronized(lifecycleLock) {
         val current = _state.value
         if (!current.isRecording) return
 
         tickerJob?.cancel()
+        checkpointJob?.cancel()
         releaseRecorder()
+        val recordedPath = activeOutputPath
+        activeOutputPath = null
+        activeInstance = null
 
         current.activeRecording?.let { rec ->
+            RecordingFailsafe.clearCheckpoint(filesDir, rec.id)
+            if (recordedPath != null && recordedPath != rec.filePath) {
+                runCatching { File(recordedPath).delete() }
+            }
+            AppRecordingBridge.ensureCoreInitialized(this)
             RustCore.deleteRecording(rec.id)
         }
 
@@ -200,10 +321,26 @@ class RecordingService : Service() {
     private fun releaseRecorder() {
         try {
             recorder?.stop()
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "MediaRecorder.stop() threw; preserving file on disk: ${e.message}")
         } finally {
-            recorder?.release()
+            runCatching { recorder?.release() }
             recorder = null
+        }
+    }
+
+    private fun startCheckpointLoop() {
+        checkpointJob?.cancel()
+        checkpointJob = scope.launch(Dispatchers.IO) {
+            while (true) {
+                delay(10_000)
+                val cur = _state.value
+                if (!cur.isRecording) break
+                val rec = cur.activeRecording ?: continue
+                val elapsed = if (cur.isPaused) accumulatedMs
+                else accumulatedMs + (System.currentTimeMillis() - startEpochMs)
+                RecordingFailsafe.saveCheckpoint(filesDir, rec.id, rec.filePath, elapsed)
+            }
         }
     }
 
@@ -574,15 +711,25 @@ class RecordingService : Service() {
     }
 
     override fun onDestroy() {
+        if (_state.value.isRecording) {
+            stopInternal()
+        }
         tickerJob?.cancel()
+        checkpointJob?.cancel()
         scope.cancel()
         recorder?.release()
         recorder = null
+        activeInstance = null
         super.onDestroy()
     }
 
     companion object {
+        private const val TAG = "RecordingService"
         private const val CHANNEL_ID = "class_recorder_live_v2"
+        @Volatile
+        private var activeInstance: RecordingService? = null
+        @Volatile
+        private var crashHandlerInstalled = false
 
         fun notificationIdFor(context: Context): Int =
             1001 + (context.packageName.hashCode() and 0x1FF)
@@ -608,21 +755,30 @@ class RecordingService : Service() {
         }
 
         fun stop(context: Context) {
-            context.startService(
-                Intent(context, RecordingService::class.java).apply { action = ACTION_STOP }
-            )
+            val intent = Intent(context, RecordingService::class.java).apply { action = ACTION_STOP }
+            try {
+                context.startService(intent)
+            } catch (_: IllegalStateException) {
+                ContextCompat.startForegroundService(context, intent)
+            }
         }
 
         fun discard(context: Context) {
-            context.startService(
-                Intent(context, RecordingService::class.java).apply { action = ACTION_DISCARD }
-            )
+            val intent = Intent(context, RecordingService::class.java).apply { action = ACTION_DISCARD }
+            try {
+                context.startService(intent)
+            } catch (_: IllegalStateException) {
+                ContextCompat.startForegroundService(context, intent)
+            }
         }
 
         fun togglePause(context: Context) {
-            context.startService(
-                Intent(context, RecordingService::class.java).apply { action = ACTION_TOGGLE_PAUSE }
-            )
+            val intent = Intent(context, RecordingService::class.java).apply { action = ACTION_TOGGLE_PAUSE }
+            try {
+                context.startService(intent)
+            } catch (_: IllegalStateException) {
+                ContextCompat.startForegroundService(context, intent)
+            }
         }
     }
 }

@@ -1,15 +1,13 @@
 package com.ryno.classrecorder.ui
 
-import android.Manifest
 import android.app.Application
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.ryno.classrecorder.core.AppDefaults
+import com.ryno.classrecorder.core.AppRecordingBridge
 import com.ryno.classrecorder.core.AppUpdateInfo
 import com.ryno.classrecorder.core.AppUpdater
 import com.ryno.classrecorder.core.CourseSlot
@@ -20,8 +18,8 @@ import com.ryno.classrecorder.core.InstallLaunchResult
 import com.ryno.classrecorder.core.JsonModels
 import com.ryno.classrecorder.core.McpStatus
 import com.ryno.classrecorder.core.PromotionGrant
-import com.ryno.classrecorder.core.RecordingBridge
 import com.ryno.classrecorder.core.RecordingExporter
+import com.ryno.classrecorder.core.RecordingFailsafe
 import com.ryno.classrecorder.core.RecordingRecord
 import com.ryno.classrecorder.core.RustCore
 import com.ryno.classrecorder.core.UnifiedSchedule
@@ -79,7 +77,7 @@ data class MainUiState(
     val statusMessage: String? = null
 )
 
-class MainViewModel(application: Application) : AndroidViewModel(application), RecordingBridge {
+class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _ui = MutableStateFlow(
         run {
@@ -104,8 +102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     init {
         val ctx = getApplication<Application>()
-        val recordingsDir = File(ctx.getExternalFilesDir(null) ?: ctx.filesDir, "Recordings")
-        RustCore.initCore(ctx.filesDir.absolutePath, recordingsDir.absolutePath, this)
+        AppRecordingBridge.ensureCoreInitialized(ctx)
 
         if (PromotionGrant.isShizukuReady() && PromotionGrant.hasPermission(ctx)) {
             viewModelScope.launch(Dispatchers.IO) {
@@ -121,7 +118,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
         }
 
         runCatching { RustCore.startMcpServer(AppDefaults.MCP_PORT, "") }
-        refreshAll()
+        viewModelScope.launch(Dispatchers.IO) {
+            val activeId = RecordingService.state.value.activeRecording?.id
+            val recovered = RecordingFailsafe.recoverOrphanedRecordings(ctx, activeId)
+            if (recovered > 0) {
+                val suffix = if (recovered == 1) "recording" else "recordings"
+                _ui.update { it.copy(statusMessage = "Recovered $recovered interrupted $suffix") }
+            }
+            refreshAll()
+        }
         checkForUpdates(manual = false)
     }
 
@@ -601,44 +606,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application), R
 
     fun clearMessage() {
         _ui.update { it.copy(statusMessage = null) }
-    }
-
-    // Called from Rust MCP spawn_blocking threads via JNI
-    override fun startRecordingFromAgent(courseJson: String): String {
-        val ctx = getApplication<Application>()
-        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            return JSONObject().put("error", "Microphone permission not granted on device").toString()
-        }
-        if (RecordingService.state.value.isRecording) {
-            return JSONObject().put("error", "A recording is already active").toString()
-        }
-        RecordingService.start(ctx, courseJson)
-        for (i in 0 until 20) {
-            Thread.sleep(100)
-            val active = RecordingService.state.value.activeRecording
-            if (RecordingService.state.value.isRecording && active != null) {
-                return JSONObject().put("recording", active.toJsonObject()).toString()
-            }
-        }
-        return JSONObject().put("error", "Timed out waiting for RecordingService to start").toString()
-    }
-
-    override fun stopRecordingFromAgent(): String {
-        val active = RecordingService.state.value.activeRecording
-            ?: return JSONObject().put("error", "No active recording").toString()
-        RecordingService.stop(getApplication())
-        for (i in 0 until 20) {
-            Thread.sleep(100)
-            if (!RecordingService.state.value.isRecording) {
-                val res = JSONObject(RustCore.listRecordings(""))
-                val list = JsonModels.parseRecordings(res.optJSONArray("data"))
-                val updated = list.firstOrNull { it.id == active.id } ?: active.copy(status = "completed")
-                return JSONObject().put("recording", updated.toJsonObject()).toString()
-            }
-        }
-        return JSONObject().put("error", "Timed out waiting for RecordingService to stop").toString()
     }
 
     private fun detectLanIp(): String = try {
